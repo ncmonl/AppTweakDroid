@@ -1,0 +1,4 @@
+PyQt6>=6.6.1
+androguard>=3.3.5
+lxml>=5.1.0
+signify>=0.6.0
