@@ -1,4 +1,5 @@
 {
     "zipalign_enabled": true,
-    "debuggable_enabled": true
+    "debuggable_enabled": true,
+    "skip_decompile_enabled": true
 }

@@ -41,7 +41,7 @@ class ApkProcessor:
         except Exception as e:
             raise Exception(f"APK文件格式无效，请确保文件未损坏：{str(e)}")
 
-    def process_apk(self, apk_path, cert_path, cert_password, key_alias, key_password, callback=None):
+    def process_apk(self, apk_path, cert_path, cert_password, key_alias, key_password, skip_decompile=False):
         """处理APK文件的主要方法"""
         try:
             self.logger(f"开始处理APK文件: {apk_path}")
@@ -61,23 +61,26 @@ class ApkProcessor:
             if not os.path.exists(apktool_path):
                 raise FileNotFoundError(f"找不到apktool工具：{apktool_path}")
 
-            # 创建临时目录前，确保清理已存在的临时目录
+
             apk_base = os.path.splitext(os.path.basename(apk_path))[0]
             temp_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'temp'))
             if not os.path.exists(temp_root):
                 os.makedirs(temp_root)
             temp_dir_path = os.path.join(temp_root, apk_base + '_work')
-            if os.path.exists(temp_dir_path):
-                self.logger(f"清理同名临时目录: {temp_dir_path}")
-                shutil.rmtree(temp_dir_path)
-            os.makedirs(temp_dir_path)
             self.temp_dir = temp_dir_path
-            self.logger(f"创建临时工作目录: {self.temp_dir}")
-            
-            # 反编译APK
-            self.logger("开始反编译APK文件...")
-            self._decompile_apk(apk_path)
-            self.logger("APK反编译完成")
+            if skip_decompile and os.path.exists(temp_dir_path):
+                self.logger(f"跳过反编译，使用已存在的临时目录: {temp_dir_path}")
+            else:
+                # 清理并新建临时目录
+                if os.path.exists(temp_dir_path):
+                    self.logger(f"清理同名临时目录: {temp_dir_path}")
+                    shutil.rmtree(temp_dir_path)
+                os.makedirs(temp_dir_path)
+                self.logger(f"创建临时工作目录: {self.temp_dir}")
+                # 反编译APK
+                self.logger("开始反编译APK文件...")
+                self._decompile_apk(apk_path)
+                self.logger("APK反编译完成")
             
             # 修改网络安全配置
             self.logger("开始修改网络安全配置...")

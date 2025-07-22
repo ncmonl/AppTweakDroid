@@ -52,13 +52,14 @@ class ProcessThread(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, config_manager, apk_path, cert_path, cert_password, key_alias, key_password):
+    def __init__(self, config_manager, apk_path, cert_path, cert_password, key_alias, key_password, skip_decompile):
         super().__init__()
         self.apk_path = apk_path
         self.cert_path = cert_path
         self.cert_password = cert_password
         self.key_alias = key_alias
         self.key_password = key_password
+        self.skip_decompile = skip_decompile
         self.processor = ApkProcessor(config_manager, logger=self.log_message)
         self.is_cancelled = False
 
@@ -70,7 +71,7 @@ class ProcessThread(QThread):
                 self.cert_password,
                 self.key_alias,
                 self.key_password,
-                self.progress_callback
+                skip_decompile=self.skip_decompile
             )
             if not self.is_cancelled:
                 self.finished_signal.emit(success, message)
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
 
     def create_menu_bar(self):
         menubar = self.menuBar()
+        if not menubar:
+            return
         
         # 选项菜单
         options_menu = menubar.addMenu('选项')
@@ -127,16 +130,23 @@ class MainWindow(QMainWindow):
         # Zipalign选项
         self.zipalign_action = QAction('启用Zipalign优化', self)
         self.zipalign_action.setCheckable(True)
-        self.zipalign_action.setChecked(self.config_manager.get_value('zipalign_enabled', False))
+        self.zipalign_action.setChecked(self.config_manager.get_value('zipalign_enabled', False) or False)
         self.zipalign_action.triggered.connect(self.toggle_zipalign)
         options_menu.addAction(self.zipalign_action)
         
         # 添加可调试选项
         self.debuggable_action = QAction('启用APK调试', self)
         self.debuggable_action.setCheckable(True)
-        self.debuggable_action.setChecked(self.config_manager.get_value('debuggable_enabled', False))
+        self.debuggable_action.setChecked(self.config_manager.get_value('debuggable_enabled', False) or False)
         self.debuggable_action.triggered.connect(self.toggle_debuggable)
         options_menu.addAction(self.debuggable_action)
+
+        # 添加跳过反编译选项
+        self.skip_decompile_action = QAction('跳过反编译', self)
+        self.skip_decompile_action.setCheckable(True)
+        self.skip_decompile_action.setChecked(self.config_manager.get_value('skip_decompile_enabled', False) or False)
+        self.skip_decompile_action.triggered.connect(self.toggle_skip_decompile)
+        options_menu.addAction(self.skip_decompile_action)
 
     def toggle_zipalign(self):
         enabled = self.zipalign_action.isChecked()
@@ -145,6 +155,10 @@ class MainWindow(QMainWindow):
     def toggle_debuggable(self):
         enabled = self.debuggable_action.isChecked()
         self.config_manager.set_value('debuggable_enabled', enabled)
+
+    def toggle_skip_decompile(self):
+        enabled = self.skip_decompile_action.isChecked()
+        self.config_manager.set_value('skip_decompile_enabled', enabled)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -194,10 +208,11 @@ class MainWindow(QMainWindow):
             }
         """)
         log_header_layout = QHBoxLayout(log_header)
-        log_header_layout.setContentsMargins(5, 2, 5, 2)  # 减小上下边距
+        log_header_layout.setContentsMargins(5, 0, 5, 0)  # 减小上下边距
         log_label = QLabel("处理日志")
         self.toggle_log_button = QPushButton("展开")  # 默认为收起状态
         self.toggle_log_button.setFixedWidth(60)
+        self.toggle_log_button.setStyleSheet("padding: 1px;")
         self.toggle_log_button.clicked.connect(self.toggle_log_area)
         log_header_layout.addWidget(log_label)
         log_header_layout.addStretch()
@@ -225,12 +240,12 @@ class MainWindow(QMainWindow):
         self.update_progress("等待开始处理...")
         
         layout.addWidget(self.log_container)
-        
-        # 保存原始窗口大小
-        self.expanded_height = None
+
+        # 添加一个弹性空间，将所有控件推到顶部
+        layout.addStretch(1)
         
         # 设置初始窗口大小
-        self.setMinimumSize(600, 400)
+        self.resize(600, 400)
         
         # 初始化为收起状态
         QTimer.singleShot(0, lambda: self.toggle_log_area(initial=True))
@@ -310,7 +325,8 @@ class MainWindow(QMainWindow):
             self.cert_path.text(),
             self.cert_password.text(),
             self.key_alias.currentText(),
-            self.key_password.text()
+            self.key_password.text(),
+            skip_decompile=self.config_manager.get_value('skip_decompile_enabled', False)
         )
 
         self.process_thread.progress_signal.connect(self.update_progress)
@@ -353,9 +369,9 @@ class MainWindow(QMainWindow):
             self.log_text.append(message)
         
         # 确保日志始终滚动到最新内容
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        scroll_bar = self.log_text.verticalScrollBar()
+        if scroll_bar:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     def process_finished(self, success, message):
         self.progress_bar.setRange(0, 100)
@@ -420,7 +436,11 @@ class MainWindow(QMainWindow):
             self.save_last_paths()  # 保存路径
 
     def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
+        mime_data = event.mimeData()
+        if not mime_data or not mime_data.hasUrls():
+            return
+            
+        urls = mime_data.urls()
         if not urls:
             return
 
@@ -482,46 +502,53 @@ class MainWindow(QMainWindow):
             print(f"加载配置失败：{str(e)}")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
+        mime_data = event.mimeData()
+        if mime_data and mime_data.hasUrls():
             event.acceptProposedAction()
 
     def open_output_directory(self):
-        output_dir = self.config_manager.get_value('output_dir', 'output')
+        output_dir = self.config_manager.get_value('output_dir', 'output') or 'output'
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(output_dir)))
 
     def toggle_log_area(self, initial=False):
         """切换日志区域的展开/收起状态"""
-        if self.toggle_log_button.text() == "收起" or initial:
-            # 保存当前窗口高度
-            if not self.expanded_height and not initial:
-                self.expanded_height = self.height()
-            
-            # 设置为最小高度显示
-            self.log_text.setMaximumHeight(19)  # 减小高度，刚好显示一行
-            self.log_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # 隐藏滚动条
+        is_collapsing = self.toggle_log_button.text() == "收起" or initial
+
+        if is_collapsing:
+            # 收起
+            self.log_text.setMinimumHeight(0)
+            self.log_text.setMaximumHeight(self.log_text.fontMetrics().height() + 10)
             self.toggle_log_button.setText("展开")
-            
-            # 调整窗口高度
-            if not initial:
-                new_height = self.height() - self.log_text.height() + 19
-                self.resize(self.width(), new_height)
-            
-            # 只显示最新的一条消息
+
             if self.full_log:
                 self.log_text.setPlainText(self.full_log[-1])
-            
+            else:
+                self.log_text.setPlainText("")
         else:
-            # 恢复原始高度
-            self.log_text.setMaximumHeight(16777215)  # 设置为 Qt 的最大值
-            self.log_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)  # 恢复滚动条
+            # 展开
+            self.log_text.setMinimumHeight(200)
+            self.log_text.setMaximumHeight(16777215)
             self.toggle_log_button.setText("收起")
-            
-            # 恢复显示完整日志
-            self.log_text.setPlainText("")  # 清空当前显示
-            for msg in self.full_log:
-                self.log_text.append(msg)
-            
-            if self.expanded_height:
-                self.resize(self.width(), self.expanded_height)
+            self.log_text.setPlainText("\n".join(self.full_log))
+
+        # 强制布局失效，以便重新计算尺寸提示
+        central_widget = self.centralWidget()
+        if central_widget:
+            layout = central_widget.layout()
+            if layout:
+                layout.invalidate()
+
+        # 异步调整窗口大小以适应内容
+        QTimer.singleShot(0, self._adjust_window_height)
+
+    def _adjust_window_height(self):
+        """调整窗口高度以适应内容，保持宽度不变"""
+        central_widget = self.centralWidget()
+        if central_widget:
+            layout = central_widget.layout()
+            if layout:
+                layout.activate()  # 强制布局更新
+        new_height = self.sizeHint().height()
+        self.resize(self.width(), new_height)
