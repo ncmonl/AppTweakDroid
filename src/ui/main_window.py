@@ -6,6 +6,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction, QIcon
 from core.apk_processor import ApkProcessor
 from core.config_manager import ConfigManager
+from core.keystore_reader import KeystoreReader
+from core.user_state_manager import UserStateManager
 from PyQt6.QtGui import QDesktopServices
 import os
 import json
@@ -108,6 +110,8 @@ class MainWindow(QMainWindow):
         # 添加别名读取状态标记
         self.aliases_loaded = False
         self.current_cert_path = ""
+        self.keystore_reader = KeystoreReader()
+        self.user_state = UserStateManager()
         
         # 创建菜单栏
         self.create_menu_bar()
@@ -393,7 +397,12 @@ class MainWindow(QMainWindow):
 
         # 若处理成功，记录当前证书信息为“上次成功处理”的证书
         if success:
-            self.save_last_success_cert()
+            self.user_state.save_last_success_cert(
+                self.cert_path.text(),
+                self.cert_password.text(),
+                self.key_alias.currentText(),
+                self.key_password.text(),
+            )
 
     def validate_inputs(self):
         if not self.apk_path.text():
@@ -431,7 +440,8 @@ class MainWindow(QMainWindow):
         if file_name:
             self.apk_path.setText(file_name)
             self.log_text.append(f"已选择APK文件：{file_name}")
-            self.save_last_paths()  # 保存路径
+            # 保存到用户状态
+            self.user_state.update_fields({'apk_path': self.apk_path.text()})
 
     def select_cert_file(self):
         # 获取当前证书路径的目录
@@ -462,71 +472,17 @@ class MainWindow(QMainWindow):
                 self.cert_path.setText(file_name)
                 self.log_text.append(f"已选择证书文件：{file_name}")
             
-            self.save_last_paths()  # 保存路径
+            # 保存到用户状态
+            self.user_state.update_fields({'cert_path': self.cert_path.text()})
 
     def read_keystore_aliases(self, keystore_path):
-        """读取keystore/jks文件中的所有alias"""
-        import subprocess
-        import re
-        aliases = []
-        
-        # 检查密码是否为空
-        if not self.cert_password.text().strip():
-            self.log_text.append("错误：请先输入证书密码")
-            return []
-        
-        # 尝试用keytool命令读取
-        keytool_cmd = ["keytool", "-list", "-keystore", keystore_path, "-storepass", self.cert_password.text()]
-        try:
-            # 尝试 utf-8，失败则用 gbk
-            try:
-                result = subprocess.run(keytool_cmd, capture_output=True, encoding='utf-8', errors='ignore')
-                output = result.stdout + result.stderr
-            except Exception:
-                result = subprocess.run(keytool_cmd, capture_output=True, encoding='gbk', errors='ignore')
-                output = result.stdout + result.stderr
-            
-            # 检查是否有错误
-            if "Keystore was tampered with, or password was incorrect" in output:
-                self.log_text.append("错误：密钥库密码不正确或密钥库文件被损坏")
-                return []
-            elif "java.io.IOException" in output:
-                self.log_text.append("错误：密钥库文件访问失败，请检查文件路径和权限")
-                return []
-            elif result.returncode != 0:
-                self.log_text.append(f"错误：keytool命令执行失败，返回码：{result.returncode}")
-                return []
-            
-            # 匹配所有别名
-            print("output: "+output)
-            for line in output.splitlines():
-                # 匹配中文格式：别名名称: xxx
-                m = re.match(r"^别名名称: (.+)$", line)
-                if m:
-                    aliases.append(m.group(1).strip())
-                else:
-                    # 匹配英文格式：Alias name: xxx
-                    m2 = re.match(r"^Alias name: (.+)$", line)
-                    if m2:
-                        aliases.append(m2.group(1).strip())
-                    else:
-                        # 匹配直接格式：别名, 日期, 类型
-                        m3 = re.match(r"^([^,]+),\s*\d{4}年\d{1,2}月\d{1,2}日,\s*PrivateKeyEntry", line)
-                        if m3:
-                            aliases.append(m3.group(1).strip())
-                        else:
-                            # 匹配英文直接格式：alias, date, PrivateKeyEntry
-                            m4 = re.match(r"^([^,]+),\s*[A-Za-z]+\s+\d{1,2},\s+\d{4},\s*PrivateKeyEntry", line)
-                            if m4:
-                                aliases.append(m4.group(1).strip())
-            
-            if not aliases:
-                self.log_text.append("警告：未找到任何密钥别名，请检查密钥库文件")
-            
-            return aliases
-        except Exception as e:
-            self.log_text.append(f"读取证书别名失败: {str(e)}")
-            return []
+        """通过工具类读取 keystore/jks 别名，并把消息输出到日志"""
+        aliases, messages = self.keystore_reader.read_aliases(
+            keystore_path, self.cert_password.text()
+        )
+        for m in messages:
+            self.log_text.append(m)
+        return aliases
 
     def dropEvent(self, event: QDropEvent):
         mime_data = event.mimeData()
@@ -541,7 +497,8 @@ class MainWindow(QMainWindow):
         if file_path.lower().endswith('.apk'):
             self.apk_path.setText(file_path)
             self.log_text.append(f"已拖放APK文件：{file_path}")
-            self.save_last_paths()  # 保存路径
+            # 保存到用户状态
+            self.user_state.update_fields({'apk_path': self.apk_path.text()})
         elif file_path.lower().endswith(('.keystore', '.jks')):
             # 只有当拖放的文件与当前文件不同时才清空
             if self.cert_path.text() != file_path:
@@ -562,96 +519,39 @@ class MainWindow(QMainWindow):
                 self.cert_path.setText(file_path)
                 self.log_text.append(f"已拖放证书文件：{file_path}")
             
-            self.save_last_paths()  # 保存路径
+            # 保存到用户状态
+            self.user_state.update_fields({'cert_path': self.cert_path.text()})
 
-    def save_last_paths(self):
-        """保存APK、证书路径和证书相关信息"""
-        try:
-            with open("last_paths.json", "w", encoding="utf-8") as f:
-                json.dump({
-                    'apk_path': self.apk_path.text(),
-                    'cert_path': self.cert_path.text(),
-                    'cert_password': self.cert_password.text(),
-                    'key_alias': self.key_alias.currentText(),
-                    'key_password': self.key_password.text()
-                }, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"保存配置失败：{str(e)}")
+    # 移除：保存逻辑交由 UserStateManager 维护
 
-    def save_last_success_cert(self):
-        """在处理成功后保存当次使用的证书信息，便于下次自动填充"""
-        try:
-            paths = {}
-            if os.path.exists("last_paths.json"):
-                with open("last_paths.json", "r", encoding="utf-8") as f:
-                    try:
-                        paths = json.load(f) or {}
-                    except Exception:
-                        paths = {}
-
-            # 更新根级字段，方便现有加载逻辑直接使用
-            paths['cert_path'] = self.cert_path.text()
-            paths['cert_password'] = self.cert_password.text()
-            paths['key_alias'] = self.key_alias.currentText()
-            paths['key_password'] = self.key_password.text()
-
-            # 同时写入结构化的 last_success_cert，便于区分场景
-            paths['last_success_cert'] = {
-                'cert_path': self.cert_path.text(),
-                'cert_password': self.cert_password.text(),
-                'key_alias': self.key_alias.currentText(),
-                'key_password': self.key_password.text()
-            }
-
-            with open("last_paths.json", "w", encoding="utf-8") as f:
-                json.dump(paths, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"保存上次成功证书信息失败：{str(e)}")
+    # 移除：成功证书保存交由 UserStateManager 维护
 
     def load_last_paths(self):
-        """加载上次使用的APK、证书路径和证书相关信息"""
+        """加载上次使用的APK、证书路径和证书相关信息（通过 UserStateManager）"""
         try:
-            if os.path.exists("last_paths.json"):
-                with open("last_paths.json", "r", encoding="utf-8") as f:
-                    paths = json.load(f)
-                    
-                    # 加载APK路径
-                    if 'apk_path' in paths and os.path.exists(paths['apk_path']):
-                        self.apk_path.setText(paths['apk_path'])
-                        self.log_text.append(f"已加载上次的APK文件路径：{paths['apk_path']}")
-                    
-                    # 加载证书路径
-                    if 'cert_path' in paths and os.path.exists(paths['cert_path']):
-                        self.cert_path.setText(paths['cert_path'])
-                        self.log_text.append(f"已加载上次的证书文件路径：{paths['cert_path']}")
-                    
-                    # 加载证书密码
-                    if 'cert_password' in paths:
-                        self.cert_password.setText(paths['cert_password'])
-                    
-                    # 加载密钥密码
-                    if 'key_password' in paths:
-                        self.key_password.setText(paths['key_password'])
+            paths = self.user_state.get_last_paths()
+            if paths and 'apk_path' in paths and os.path.exists(paths['apk_path']):
+                self.apk_path.setText(paths['apk_path'])
+                self.log_text.append(f"已加载上次的APK文件路径：{paths['apk_path']}")
 
-                    # 若存在上次成功处理的证书信息，优先覆盖为成功记录
-                    last_success = paths.get('last_success_cert') or {}
-                    if last_success and os.path.exists(last_success.get('cert_path', '') or ''):
-                        if last_success.get('cert_path'):
-                            self.cert_path.setText(last_success['cert_path'])
-                        if 'cert_password' in last_success:
-                            self.cert_password.setText(last_success['cert_password'] or '')
-                        if 'key_password' in last_success:
-                            self.key_password.setText(last_success['key_password'] or '')
-                        # 先把 UI 的当前文本设为记录的别名，真正的可选项将在自动读取后对齐
-                        if 'key_alias' in last_success:
-                            self.key_alias.setEditText(last_success['key_alias'] or '')
-                        self.log_text.append("已优先加载上次成功处理的证书信息")
+            # 由 UserStateManager 统一计算优先证书
+            effective = self.user_state.get_effective_certificate()
+            if effective.get('cert_path'):
+                self.cert_path.setText(effective['cert_path'])
+                if effective.get('cert_password') is not None:
+                    self.cert_password.setText(effective['cert_password'])
+                if effective.get('key_password') is not None:
+                    self.key_password.setText(effective['key_password'])
+                if effective.get('key_alias') is not None:
+                    self.key_alias.setEditText(effective['key_alias'])
+                if effective.get('source') == 'last_success':
+                    self.log_text.append("已优先加载上次成功处理的证书信息")
+                else:
+                    self.log_text.append("已加载上次使用的证书信息")
 
-                    # 依据当前界面上是否已有证书路径与密码来安排自动读取别名
-                    if (self.cert_path.text().strip() and os.path.exists(self.cert_path.text()) and
-                        self.cert_password.text().strip()):
-                        QTimer.singleShot(500, self._auto_load_aliases)
-                    
+            # 根据当前输入判断是否自动读取别名
+            if self.user_state.should_auto_load_aliases(self.cert_path.text(), self.cert_password.text()):
+                QTimer.singleShot(500, self._auto_load_aliases)
         except Exception as e:
             print(f"加载配置失败：{str(e)}")
     
@@ -666,21 +566,13 @@ class MainWindow(QMainWindow):
             self.key_alias.clear()
             for alias in alias_list:
                 self.key_alias.addItem(alias)
-            
-            # 尝试恢复上次选择的别名
-            try:
-                if os.path.exists("last_paths.json"):
-                    with open("last_paths.json", "r", encoding="utf-8") as f:
-                        paths = json.load(f)
-                        if 'key_alias' in paths and paths['key_alias'] in alias_list:
-                            self.key_alias.setCurrentText(paths['key_alias'])
-                            self.log_text.append(f"已恢复上次的密钥别名：{paths['key_alias']}")
-                        elif alias_list:
-                            self.key_alias.setCurrentText(alias_list[0])
-                            self.log_text.append(f"已自动选择密钥别名：{alias_list[0]}")
-            except Exception:
-                if alias_list:
-                    self.key_alias.setCurrentText(alias_list[0])
+
+            # 交由 UserStateManager 选择最合适的别名
+            chosen, msgs = self.user_state.get_preferred_alias_for_startup(alias_list)
+            for m in msgs:
+                self.log_text.append(m)
+            if chosen:
+                self.key_alias.setCurrentText(chosen)
             
             # 标记已读取
             self.aliases_loaded = True
@@ -712,6 +604,10 @@ class MainWindow(QMainWindow):
             if alias_list:
                 self.log_text.append(f"已读取到密钥别名：{', '.join(alias_list)}")
                 self.log_text.append("请从下拉框中选择密钥别名")
+                # 如果状态中记录了别名，则优先设定；否则保持空等用户选择
+                chosen, _ = self.user_state.get_preferred_alias_for_startup(alias_list)
+                if chosen:
+                    self.key_alias.setCurrentText(chosen)
             else:
                 self.key_alias.setCurrentText("")
             
