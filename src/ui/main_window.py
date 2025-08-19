@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QLineEdit, 
                                QProgressBar, QTextEdit, QComboBox,
-                               QFileDialog, QMenuBar, QMenu, QLabel)
+                               QFileDialog, QMenuBar, QMenu, QLabel, QCheckBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QAction, QIcon
 from core.apk_processor import ApkProcessor
@@ -167,6 +167,16 @@ class MainWindow(QMainWindow):
     def toggle_skip_decompile(self):
         enabled = self.skip_decompile_action.isChecked()
         self.config_manager.set_value('skip_decompile_enabled', enabled)
+        # 同步到复选框
+        if hasattr(self, 'skip_decompile_checkbox'):
+            self.skip_decompile_checkbox.setChecked(enabled)
+
+    def on_skip_decompile_toggled(self):
+        enabled = self.skip_decompile_checkbox.isChecked()
+        # 同步到菜单项
+        if hasattr(self, 'skip_decompile_action'):
+            self.skip_decompile_action.setChecked(enabled)
+        self.config_manager.set_value('skip_decompile_enabled', enabled)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -260,6 +270,15 @@ class MainWindow(QMainWindow):
 
     def create_file_input_section(self, parent_layout):
         group_layout = QVBoxLayout()
+        
+        # 跳过反编译（复选框，放在 APK 区域上方）
+        skip_row = QHBoxLayout()
+        self.skip_decompile_checkbox = QCheckBox("跳过反编译")
+        self.skip_decompile_checkbox.setChecked(self.config_manager.get_value('skip_decompile_enabled', False) or False)
+        self.skip_decompile_checkbox.stateChanged.connect(self.on_skip_decompile_toggled)
+        skip_row.addWidget(self.skip_decompile_checkbox)
+        skip_row.addStretch(1)
+        group_layout.addLayout(skip_row)
         
         # APK文件选择
         apk_layout = QHBoxLayout()
