@@ -105,6 +105,10 @@ class MainWindow(QMainWindow):
         # 设置程序图标
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), 'resources', 'app_icon.svg')))
         
+        # 添加别名读取状态标记
+        self.aliases_loaded = False
+        self.current_cert_path = ""
+        
         # 创建菜单栏
         self.create_menu_bar()
         
@@ -289,6 +293,7 @@ class MainWindow(QMainWindow):
         cert_pass_label = QLabel("证书密码：")
         self.cert_password = PasswordLineEdit()
         self.cert_password.setPlaceholderText("证书密码")
+        self.cert_password.textChanged.connect(self.on_cert_password_changed)
         cert_pass_layout.addWidget(cert_pass_label)
         cert_pass_layout.addWidget(self.cert_password)
         
@@ -298,8 +303,12 @@ class MainWindow(QMainWindow):
         self.key_alias = QComboBox()
         self.key_alias.setEditable(True)
         self.key_alias.setPlaceholderText("密钥别名")
+        # 添加读取别名按钮
+        read_alias_button = QPushButton("读取别名")
+        read_alias_button.clicked.connect(self.read_aliases_from_keystore)
         key_alias_layout.addWidget(key_alias_label)
         key_alias_layout.addWidget(self.key_alias, 1)  # 设置拉伸因子为1
+        key_alias_layout.addWidget(read_alias_button)
         
         # 密钥密码
         key_pass_layout = QHBoxLayout()
@@ -382,6 +391,10 @@ class MainWindow(QMainWindow):
         status = "成功" if success else "失败"
         self.log_text.append(f"处理{status}：{message}")
 
+        # 若处理成功，记录当前证书信息为“上次成功处理”的证书
+        if success:
+            self.save_last_success_cert()
+
     def validate_inputs(self):
         if not self.apk_path.text():
             self.log_text.append("错误：请选择APK文件")
@@ -423,7 +436,6 @@ class MainWindow(QMainWindow):
     def select_cert_file(self):
         # 获取当前证书路径的目录
         current_dir = os.path.dirname(self.cert_path.text()) if self.cert_path.text() else ""
-        
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             "选择证书文件",
@@ -431,9 +443,90 @@ class MainWindow(QMainWindow):
             "证书文件 (*.keystore *.jks)"
         )
         if file_name:
-            self.cert_path.setText(file_name)
-            self.log_text.append(f"已选择证书文件：{file_name}")
+            # 只有当选择的文件与当前文件不同时才清空
+            if self.cert_path.text() != file_name:
+                # 清空密码和别名，避免使用错误的密码
+                self.cert_password.clear()
+                self.key_alias.clear()
+                self.key_password.clear()
+                
+                # 重置别名读取状态
+                self.aliases_loaded = False
+                self.current_cert_path = file_name
+                
+                self.cert_path.setText(file_name)
+                self.log_text.append(f"已选择证书文件：{file_name}")
+                self.log_text.append("提示：请输入证书密码后，点击\"读取别名\"按钮")
+            else:
+                # 选择的是同一个文件，不清空
+                self.cert_path.setText(file_name)
+                self.log_text.append(f"已选择证书文件：{file_name}")
+            
             self.save_last_paths()  # 保存路径
+
+    def read_keystore_aliases(self, keystore_path):
+        """读取keystore/jks文件中的所有alias"""
+        import subprocess
+        import re
+        aliases = []
+        
+        # 检查密码是否为空
+        if not self.cert_password.text().strip():
+            self.log_text.append("错误：请先输入证书密码")
+            return []
+        
+        # 尝试用keytool命令读取
+        keytool_cmd = ["keytool", "-list", "-keystore", keystore_path, "-storepass", self.cert_password.text()]
+        try:
+            # 尝试 utf-8，失败则用 gbk
+            try:
+                result = subprocess.run(keytool_cmd, capture_output=True, encoding='utf-8', errors='ignore')
+                output = result.stdout + result.stderr
+            except Exception:
+                result = subprocess.run(keytool_cmd, capture_output=True, encoding='gbk', errors='ignore')
+                output = result.stdout + result.stderr
+            
+            # 检查是否有错误
+            if "Keystore was tampered with, or password was incorrect" in output:
+                self.log_text.append("错误：密钥库密码不正确或密钥库文件被损坏")
+                return []
+            elif "java.io.IOException" in output:
+                self.log_text.append("错误：密钥库文件访问失败，请检查文件路径和权限")
+                return []
+            elif result.returncode != 0:
+                self.log_text.append(f"错误：keytool命令执行失败，返回码：{result.returncode}")
+                return []
+            
+            # 匹配所有别名
+            print("output: "+output)
+            for line in output.splitlines():
+                # 匹配中文格式：别名名称: xxx
+                m = re.match(r"^别名名称: (.+)$", line)
+                if m:
+                    aliases.append(m.group(1).strip())
+                else:
+                    # 匹配英文格式：Alias name: xxx
+                    m2 = re.match(r"^Alias name: (.+)$", line)
+                    if m2:
+                        aliases.append(m2.group(1).strip())
+                    else:
+                        # 匹配直接格式：别名, 日期, 类型
+                        m3 = re.match(r"^([^,]+),\s*\d{4}年\d{1,2}月\d{1,2}日,\s*PrivateKeyEntry", line)
+                        if m3:
+                            aliases.append(m3.group(1).strip())
+                        else:
+                            # 匹配英文直接格式：alias, date, PrivateKeyEntry
+                            m4 = re.match(r"^([^,]+),\s*[A-Za-z]+\s+\d{1,2},\s+\d{4},\s*PrivateKeyEntry", line)
+                            if m4:
+                                aliases.append(m4.group(1).strip())
+            
+            if not aliases:
+                self.log_text.append("警告：未找到任何密钥别名，请检查密钥库文件")
+            
+            return aliases
+        except Exception as e:
+            self.log_text.append(f"读取证书别名失败: {str(e)}")
+            return []
 
     def dropEvent(self, event: QDropEvent):
         mime_data = event.mimeData()
@@ -450,8 +543,25 @@ class MainWindow(QMainWindow):
             self.log_text.append(f"已拖放APK文件：{file_path}")
             self.save_last_paths()  # 保存路径
         elif file_path.lower().endswith(('.keystore', '.jks')):
-            self.cert_path.setText(file_path)
-            self.log_text.append(f"已拖放证书文件：{file_path}")
+            # 只有当拖放的文件与当前文件不同时才清空
+            if self.cert_path.text() != file_path:
+                # 清空密码和别名，避免使用错误的密码
+                self.cert_password.clear()
+                self.key_alias.clear()
+                self.key_password.clear()
+                
+                # 重置别名读取状态
+                self.aliases_loaded = False
+                self.current_cert_path = file_path
+                
+                self.cert_path.setText(file_path)
+                self.log_text.append(f"已拖放证书文件：{file_path}")
+                self.log_text.append("提示：请输入证书密码后，点击\"读取别名\"按钮")
+            else:
+                # 拖放的是同一个文件，不清空
+                self.cert_path.setText(file_path)
+                self.log_text.append(f"已拖放证书文件：{file_path}")
+            
             self.save_last_paths()  # 保存路径
 
     def save_last_paths(self):
@@ -467,6 +577,36 @@ class MainWindow(QMainWindow):
                 }, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存配置失败：{str(e)}")
+
+    def save_last_success_cert(self):
+        """在处理成功后保存当次使用的证书信息，便于下次自动填充"""
+        try:
+            paths = {}
+            if os.path.exists("last_paths.json"):
+                with open("last_paths.json", "r", encoding="utf-8") as f:
+                    try:
+                        paths = json.load(f) or {}
+                    except Exception:
+                        paths = {}
+
+            # 更新根级字段，方便现有加载逻辑直接使用
+            paths['cert_path'] = self.cert_path.text()
+            paths['cert_password'] = self.cert_password.text()
+            paths['key_alias'] = self.key_alias.currentText()
+            paths['key_password'] = self.key_password.text()
+
+            # 同时写入结构化的 last_success_cert，便于区分场景
+            paths['last_success_cert'] = {
+                'cert_path': self.cert_path.text(),
+                'cert_password': self.cert_password.text(),
+                'key_alias': self.key_alias.currentText(),
+                'key_password': self.key_password.text()
+            }
+
+            with open("last_paths.json", "w", encoding="utf-8") as f:
+                json.dump(paths, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"保存上次成功证书信息失败：{str(e)}")
 
     def load_last_paths(self):
         """加载上次使用的APK、证书路径和证书相关信息"""
@@ -489,17 +629,107 @@ class MainWindow(QMainWindow):
                     if 'cert_password' in paths:
                         self.cert_password.setText(paths['cert_password'])
                     
-                    # 加载密钥别名
-                    if 'key_alias' in paths:
-                        self.key_alias.clear()  # 清除现有项
-                        self.key_alias.addItem(paths['key_alias'])
-                        self.key_alias.setCurrentText(paths['key_alias'])
-                    
                     # 加载密钥密码
                     if 'key_password' in paths:
                         self.key_password.setText(paths['key_password'])
+
+                    # 若存在上次成功处理的证书信息，优先覆盖为成功记录
+                    last_success = paths.get('last_success_cert') or {}
+                    if last_success and os.path.exists(last_success.get('cert_path', '') or ''):
+                        if last_success.get('cert_path'):
+                            self.cert_path.setText(last_success['cert_path'])
+                        if 'cert_password' in last_success:
+                            self.cert_password.setText(last_success['cert_password'] or '')
+                        if 'key_password' in last_success:
+                            self.key_password.setText(last_success['key_password'] or '')
+                        # 先把 UI 的当前文本设为记录的别名，真正的可选项将在自动读取后对齐
+                        if 'key_alias' in last_success:
+                            self.key_alias.setEditText(last_success['key_alias'] or '')
+                        self.log_text.append("已优先加载上次成功处理的证书信息")
+
+                    # 依据当前界面上是否已有证书路径与密码来安排自动读取别名
+                    if (self.cert_path.text().strip() and os.path.exists(self.cert_path.text()) and
+                        self.cert_password.text().strip()):
+                        QTimer.singleShot(500, self._auto_load_aliases)
+                    
         except Exception as e:
             print(f"加载配置失败：{str(e)}")
+    
+    def _auto_load_aliases(self):
+        """自动加载别名（在程序启动时调用）"""
+        if (self.cert_path.text().strip() and 
+            self.cert_password.text().strip() and 
+            os.path.exists(self.cert_path.text())):
+            
+            # 读取别名
+            alias_list = self.read_keystore_aliases(self.cert_path.text())
+            self.key_alias.clear()
+            for alias in alias_list:
+                self.key_alias.addItem(alias)
+            
+            # 尝试恢复上次选择的别名
+            try:
+                if os.path.exists("last_paths.json"):
+                    with open("last_paths.json", "r", encoding="utf-8") as f:
+                        paths = json.load(f)
+                        if 'key_alias' in paths and paths['key_alias'] in alias_list:
+                            self.key_alias.setCurrentText(paths['key_alias'])
+                            self.log_text.append(f"已恢复上次的密钥别名：{paths['key_alias']}")
+                        elif alias_list:
+                            self.key_alias.setCurrentText(alias_list[0])
+                            self.log_text.append(f"已自动选择密钥别名：{alias_list[0]}")
+            except Exception:
+                if alias_list:
+                    self.key_alias.setCurrentText(alias_list[0])
+            
+            # 标记已读取
+            self.aliases_loaded = True
+            self.current_cert_path = self.cert_path.text()
+            
+            if alias_list:
+                self.log_text.append(f"已自动读取到密钥别名：{', '.join(alias_list)}")
+            else:
+                self.log_text.append("警告：未找到任何密钥别名")
+
+    def read_aliases_from_keystore(self):
+        """点击读取别名按钮时调用"""
+        # 检查是否有证书文件和密码
+        if not self.cert_path.text().strip():
+            self.log_text.append("提示：请先选择证书文件")
+            return
+        
+        if not self.cert_password.text().strip():
+            self.log_text.append("提示：请先输入证书密码")
+            return
+        
+        # 检查是否已经读取过别名，或者证书文件路径发生了变化
+        if not self.aliases_loaded or self.current_cert_path != self.cert_path.text():
+            # 首次读取或证书文件变化，需要重新读取
+            alias_list = self.read_keystore_aliases(self.cert_path.text())
+            self.key_alias.clear()
+            for alias in alias_list:
+                self.key_alias.addItem(alias)
+            if alias_list:
+                self.log_text.append(f"已读取到密钥别名：{', '.join(alias_list)}")
+                self.log_text.append("请从下拉框中选择密钥别名")
+            else:
+                self.key_alias.setCurrentText("")
+            
+            # 标记已读取
+            self.aliases_loaded = True
+            self.current_cert_path = self.cert_path.text()
+        else:
+            self.log_text.append("别名已读取，请从下拉框中选择")
+
+    def on_cert_password_changed(self):
+        """当证书密码改变时，不再自动读取别名"""
+        # 移除自动读取功能，改为点击时读取
+        pass
+    
+    def _auto_read_aliases(self):
+        """自动读取密钥别名（已废弃）"""
+        # 此功能已废弃，改为点击时读取
+        pass
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         mime_data = event.mimeData()
